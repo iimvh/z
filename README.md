@@ -63,7 +63,22 @@ server.dispose();  // remove route /a -> server: stop
 root.dispose();    // disposes whatever is left
 ```
 
-Each branch has its own undo list, so disposing `server` leaves its siblings untouched. See [`Main.java`](java/examples/src/main/java/Main.java) for a complete tree written with named classes instead of lambdas.
+The code above builds this tree. Numbers show the order of creation:
+
+```mermaid
+flowchart TD
+  root(["root"])
+  db["db (1)"]
+  server["server (2)"]
+  route["route effect (3)"]
+  child["child (4)"]
+  root --> db
+  root --> server
+  server --> route
+  server --> child
+```
+
+Disposing `server` undoes its contents in reverse start order, children before the parent: `child` → `route` → `server`. Each branch has its own undo list, so `db` is untouched until `root` is disposed. See [`Main.java`](java/examples/src/main/java/Main.java) for a complete tree written with named classes instead of lambdas.
 
 ### Core API
 
@@ -80,6 +95,18 @@ Each branch has its own undo list, so disposing `server` leaves its siblings unt
 > Long-running effects should check the `Signal` or register with `onCancel` so teardown does not have to wait for them to finish.
 
 ## Guarantees
+
+A fiber moves in one direction only. If finishing a disposal would require waiting on itself or closing a deadlock cycle, the disposal is suspended and the thread holding the blocking work resumes it, in the correct order, once that work finishes.
+
+```mermaid
+stateDiagram-v2
+  [*] --> ALIVE
+  ALIVE --> DISPOSING: dispose()
+  DISPOSING --> SUSPENDED: waiting would deadlock
+  SUSPENDED --> DISPOSING: blocking work finishes
+  DISPOSING --> DISPOSED: all undos done
+  DISPOSED --> [*]
+```
 
 - **Ordering:** disposal runs in reverse start order, children before parents.
 - **Exactly once:** each undo runs at most once, even with concurrent `dispose()` calls.
