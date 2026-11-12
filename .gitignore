@@ -1,0 +1,22 @@
+# ---- Operating system ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Editors / IDEs ----
+.idea/
+*.iml
+.vscode/
+*.swp
+*~
+
+# ---- Claude Code ----
+.claude/
+
+# ---- Logs and local environment ----
+*.log
+.env
+.env.*
+!.env.example
+
+# Language-specific rules live next to the code, e.g. java/.gitignore

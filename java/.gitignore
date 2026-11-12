@@ -1,0 +1,19 @@
+# ---- Gradle ----
+.gradle/
+build/
+.kotlin/
+
+# Per-machine Gradle settings (e.g. sdk/JDK paths); never commit these.
+local.properties
+
+# NOTE: gradle/wrapper/gradle-wrapper.jar and gradlew(.bat) MUST be committed.
+
+# ---- Java ----
+*.class
+hs_err_pid*
+replay_pid*
+
+# ---- Manual javac output / IDE files ----
+out/
+.idea/
+*.iml

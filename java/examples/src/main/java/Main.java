@@ -1,6 +1,6 @@
-// Ví dụ chạy kernel, không dùng lambda: mỗi việc là một class có tên.
+// Example of running the kernel, without lambdas: each piece of work is a named class.
 //
-// Cây được dựng ra:
+// The tree that is built:
 //
 //   root
 //    ├─ Db
@@ -8,34 +8,41 @@
 //        ├─ effect: RouteEffect
 //        └─ ChildComponent
 //
-// Cách đọc output:
-//   - Tạo theo thứ tự: db → server → route → child.
-//   - Dọn theo thứ tự NGƯỢC: child → route → server (con trước, cha sau).
-//   - Gỡ `server` không ảnh hưởng `db`, vì mỗi nhánh có danh sách hoàn tác riêng.
+// How to read the output:
+//   - Created in order: db -> server -> route -> child.
+//   - Disposed in REVERSE order: child -> route -> server (children first, parent last).
+//   - Disposing `server` does not affect `db`, because each branch has its own undo list.
+
+import core.Component;
+import core.Disposable;
+import core.Effect;
+import core.Fiber;
+import core.Signal;
+
 public class Main {
 
   public static void main(String[] args) {
-    // Root: fiber không có cha (parent = null). Mọi thứ khác nằm dưới nó.
-    Fiber root = new Fiber(null);
+    // Root: can only be created with Fiber.root(...). Everything else lives under it.
+    Fiber root = Fiber.root("root");
 
-    // use() tạo một Fiber con cho Db, rồi gọi Db.apply(fiberCon).
+    // use() creates a child Fiber for Db, then calls Db.apply(childFiber).
     root.use(new Db());
 
-    // Giữ handle trả về từ use() để tự gỡ riêng nhánh server sau này.
+    // Keep the handle returned by use() so the server branch can be disposed on its own later.
     Disposable server = root.use(new Server());
 
-    // Gỡ riêng nhánh server: chạy child → route → server stop. db vẫn còn.
+    // Dispose only the server branch: runs child -> route -> server stop. db remains.
     System.out.println("--- dispose server only");
     server.dispose();
 
-    // Gỡ toàn bộ cây còn lại: chỉ còn db.
+    // Dispose the rest of the tree: only db is left.
     System.out.println("--- dispose root");
     root.dispose();
   }
 
   // ---- Db ----
 
-  // Component: use() truyền vào `fiber` là fiber con của riêng Db. Db không dùng đến nó.
+  // Component: use() passes `fiber`, a child fiber owned by Db. Db does not use it.
   static class Db implements Component {
     @Override
     public Disposable apply(Fiber fiber) {
@@ -58,13 +65,13 @@ public class Main {
     public Disposable apply(Fiber fiber) {
       System.out.println("server: listen");
 
-      // Một effect thuần (không phải component) nằm dưới fiber của server.
+      // A plain effect (not a component) lives under the server's fiber.
       fiber.effect(new RouteEffect());
 
-      // Component lồng trong component: ChildComponent thuộc về fiber của server.
+      // A component nested inside a component: ChildComponent belongs to the server's fiber.
       fiber.use(new ChildComponent());
 
-      // Phần dọn dẹp riêng của server. Chạy SAU khi các thứ nó tạo ra đã được dọn.
+      // The server's own cleanup. Runs AFTER the things it created have been disposed.
       return new ServerStop();
     }
   }
@@ -76,9 +83,10 @@ public class Main {
     }
   }
 
+  // signal: cancelled when the fiber containing this effect starts disposing. Not needed for such a quick effect.
   static class RouteEffect implements Effect {
     @Override
-    public Disposable run() {
+    public Disposable run(Signal signal) {
       System.out.println("server: add route /a");
       return new RouteRemove();
     }
