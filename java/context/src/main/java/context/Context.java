@@ -4,11 +4,13 @@ import core.Component;
 import core.Disposable;
 import core.Effect;
 import core.Fiber;
+import core.FiberClosedException;
 import core.Signal;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * What a plugin sees: its own fiber, the services it declared, and a way to install more plugins and
@@ -20,7 +22,8 @@ import java.util.Optional;
  *  - plugin       : a child plugin, started now or as soon as its services exist;
  *  - provide      : publishes a service to the whole tree; undo = retract it, which first disposes
  *                   every plugin that depends on it;
- *  - on / hook    : listens to an event or answers a hook; undo = unregister, after every running call.
+ *  - on / hook    : listens to an event or answers a hook; undo = unregister, after every running call;
+ *  - spawn        : runs a job on its own virtual thread; undo = cancel it and wait until it returns.
  */
 public sealed class Context permits Root {
 
@@ -219,6 +222,68 @@ public sealed class Context permits Root {
       // Runs after f is disposed, i.e. after every call still running in it has returned.
       return () -> reg.bus.remove(key, r);
     });
+  }
+
+  // ---------------- tasks ----------------
+
+  /**
+   * Runs a job on a new virtual thread, owned by this context. When this context (or the returned task)
+   * is disposed, the job's signal is cancelled, its thread is interrupted, and the disposal WAITS until
+   * the job has returned, so nothing it uses is cleaned up under it.
+   *
+   * A job that fails (other than by being cancelled) completes the task with its error, which await()
+   * throws, and is also reported to the ErrorHandler, so it is never lost when nobody awaits.
+   */
+  public <T> Task<T> spawn(String name, Job<T> job) {
+    Objects.requireNonNull(name, "name");
+    Objects.requireNonNull(job, "job");
+    String full = this.name + "/" + name;
+    CompletableFuture<T> result = new CompletableFuture<>();
+    Thread[] thread = new Thread[1];
+    Disposable handle = fiber.use("spawn:" + name, f -> {
+      Thread t = Thread.ofVirtual().name(full).unstarted(() -> runJob(f, name, full, job, result));
+      thread[0] = t;
+      t.start();
+      // Runs after f is disposed, i.e. after the job returned (or never started).
+      return () -> result.completeExceptionally(Task.cancelled(full, null));
+    });
+    return new Task<>(result, handle, thread[0]);
+  }
+
+  private <T> void runJob(Fiber f, String name, String full, Job<T> job, CompletableFuture<T> result) {
+    try {
+      // The job runs as an effect: while it runs its slot is PENDING, so disposing f waits for it.
+      f.effect(name, signal -> {
+        Thread me = Thread.currentThread();
+        Disposable interrupt = signal.onCancel(me::interrupt);
+        try {
+          result.complete(job.run(signal));
+        } catch (Throwable t) {
+          if (t instanceof VirtualMachineError e) throw e;
+          if (signal.isCancelled()) {
+            result.completeExceptionally(Task.cancelled(full, t)); // stopped because we asked it to
+          } else {
+            report(full, t);                  // first, so it is reported by the time await() throws
+            result.completeExceptionally(t);
+          }
+        } finally {
+          interrupt.dispose();
+          Thread.interrupted(); // do not leak an interrupt aimed at the job
+        }
+        return null;
+      });
+    } catch (FiberClosedException closed) {
+      result.completeExceptionally(Task.cancelled(full, null)); // disposed before the job could start
+    }
+  }
+
+  private void report(String source, Throwable t) {
+    try {
+      reg.errors.report(source, t);
+    } catch (Throwable broken) {
+      if (broken instanceof VirtualMachineError e) throw e;
+      ErrorHandler.STDERR.report(source, t);
+    }
   }
 
   // ---------------- services ----------------

@@ -25,6 +25,8 @@ On top of the tree, the `context` module adds **plugins and services**:
 - `ctx.provide(key, impl)` publishes a service; retracting it first disposes every plugin that depends on it, then lets the provider clean up.
 - When the services come back, dependent plugins are applied again in a fresh context.
 - `ctx.on(event, listener)` and `ctx.hook(hook, handler)` live as long as the plugin that registered them.
+- A `ConfigPlugin<C>` takes a config; changing it at runtime reconfigures or restarts only that plugin's branch.
+- `ctx.spawn(name, job)` runs a job on a virtual thread; disposing its owner cancels it and waits until it returns.
 
 `core` and `context` have no library dependencies and are built to stay that way.
 
@@ -39,8 +41,9 @@ On top of the tree, the `context` module adds **plugins and services**:
 git clone https://github.com/ismhac/z.git
 cd z/java
 
-# Run the example
-./gradlew :examples:run
+# Run the examples
+./gradlew :examples:run          # core: fibers, effects, components
+./gradlew :examples:runPlugins   # context: plugins, services, events, config, tasks
 
 # Run the full test suite
 ./gradlew check
@@ -121,6 +124,8 @@ root.dispose();  // disposes whatever is left
 | `EventKey<E>`, `Listener<E>` | Typed event and its observer: `on()`, `emit()` |
 | `HookKey<E, R>`, `Hook<E, R>` | Typed request and its handler: `hook()`, `bail()`, `collect()` |
 | `EmitException` | Every listener failure of one `emit()` / `collect()`, each with its source |
+| `ConfigPlugin<C>`, `ConfigHandle<C>` | Plugin with a config: `apply(ctx, config)`, `reconfigure()`; `update()`, `config()` |
+| `Job<T>`, `Task<T>` | Work on a virtual thread: `spawn()`; `await()`, `isDone()`, `dispose()` |
 
 Service guarantees, in addition to the core ones:
 
@@ -150,6 +155,38 @@ List<Integer> all = root.collect(ASK, "four");    // every non-null answer
 - **No call after unregistration:** each call runs as an effect in the registration's own fiber. Unregistering waits (through the core) for calls still running on other threads, and refuses new ones. A listener may unregister itself during its own call.
 - **No silent loss:** `emit` and `collect` run every listener, then throw all failures together as an `EmitException`. `bail` throws at the first failure.
 - **Typed:** an event or answer of the wrong type is rejected with `ClassCastException`.
+
+### Config and hot reload
+
+```java
+record DbConfig(String url) {}
+
+ConfigHandle<DbConfig> db = root.plugin("db", (ctx, cfg) -> {
+  ctx.provide(DB, cfg::url);
+  return () -> System.out.println("db: close " + cfg.url());
+}, new DbConfig("pg://one"));
+
+db.update(new DbConfig("pg://two"));  // restarts only "db"; its dependents follow the service rules
+```
+
+- **Only this branch:** an update disposes and re-applies only that plugin. Plugins that depend on a service it provides are stopped first and started again with the new service. The rest of the tree is untouched.
+- **In place when possible:** override `reconfigure(ctx, previous, next)` and return `true` to apply a change without restarting. It runs inside the instance's fiber, so a concurrent disposal waits for it.
+- **Converges on the latest config:** configs are compared with `equals()` (records are ideal). One thread updates a plugin at a time; concurrent or re-entrant `update()` calls are coalesced and the newest config wins. A plugin waiting for services just records it.
+- **Failures:** a failing restart or `reconfigure()` throws to the `update()` caller, and the plugin is left stopped (never half-updated) until the next update or service change.
+
+### Tasks
+
+```java
+Task<String> t = ctx.spawn("fetch", signal -> {
+  return http.get(url);          // blocking I/O is interrupted when the task is cancelled
+});
+String body = t.await();         // the job's result, or its exception unchanged
+t.dispose();                     // cancel and wait until the job has returned
+```
+
+- **Owned by the tree:** each job runs on its own virtual thread, as an effect in a child fiber. Disposing the task, its plugin or the root cancels the signal, interrupts the thread, and **waits until the job returns** (deadlock-safe, through the core), so nothing it uses is cleaned up under it.
+- **No silent loss:** a job that fails (other than by being cancelled) is reported to the `ErrorHandler` and also thrown by `await()`. A cancelled job's `await()` throws `CancelledException`.
+- **No self-deadlock:** a job awaiting its own task gets `DeadlockException`; a job may dispose its own task.
 
 ### Core API
 
@@ -195,8 +232,8 @@ stateDiagram-v2
 ```text
 java/
 ├── core/        Lifecycle kernel (Fiber, Signal, Teardown, WaitGraph, ...)
-├── context/     Plugins, services and events on top of core (Context, Plugin, ServiceKey, EventKey, ...)
-├── examples/    Example program using core
+├── context/     Plugins, services, events, config and tasks on top of core (Context, Plugin, ...)
+├── examples/    Example programs (Main: core, PluginsMain: context)
 └── buildSrc/    Shared Gradle conventions (Java 21, -Xlint:all -Werror)
 ```
 
