@@ -23,6 +23,7 @@ final class Registry {
 
   final Object lock = new Object();
   final ErrorHandler errors;
+  final Bus bus = new Bus();
 
   private final Map<ServiceKey<?>, Provision> services = new LinkedHashMap<>();
   private final Map<ServiceKey<?>, Set<Host>> waiting = new HashMap<>();

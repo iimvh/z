@@ -24,6 +24,7 @@ On top of the tree, the `context` module adds **plugins and services**:
 - A `Plugin` declares the services it `requires()` and runs only while all of them are provided.
 - `ctx.provide(key, impl)` publishes a service; retracting it first disposes every plugin that depends on it, then lets the provider clean up.
 - When the services come back, dependent plugins are applied again in a fresh context.
+- `ctx.on(event, listener)` and `ctx.hook(hook, handler)` live as long as the plugin that registered them.
 
 `core` and `context` have no library dependencies and are built to stay that way.
 
@@ -117,6 +118,9 @@ root.dispose();  // disposes whatever is left
 | `ServiceKey<T>` | Typed service name; same name and type means same service |
 | `PluginHandle` | Uninstalls a plugin for good; `isActive()` |
 | `ErrorHandler` | Receives failures with no caller (a plugin started by another thread's `provide()`) |
+| `EventKey<E>`, `Listener<E>` | Typed event and its observer: `on()`, `emit()` |
+| `HookKey<E, R>`, `Hook<E, R>` | Typed request and its handler: `hook()`, `bail()`, `collect()` |
+| `EmitException` | Every listener failure of one `emit()` / `collect()`, each with its source |
 
 Service guarantees, in addition to the core ones:
 
@@ -125,6 +129,27 @@ Service guarantees, in addition to the core ones:
 - **One provider per key:** a second `provide()` of a key throws `ServiceConflictException` until the first is retracted.
 - **Tracked lifetimes:** `ctx.get()` only returns services declared in `requires()`.
 - **Failures:** a plugin applied immediately throws to the `plugin()` caller; one started by a provider reports to the `ErrorHandler` and is retried when its services change.
+
+### Events and hooks
+
+```java
+EventKey<String> MSG = EventKey.of("msg", String.class);
+HookKey<String, Integer> ASK = HookKey.of("ask", String.class, Integer.class);
+
+root.plugin("logger", ctx -> {
+  ctx.on(MSG, m -> System.out.println("got " + m));  // removed when "logger" is disposed
+  ctx.hook(ASK, q -> q.length());
+  return null;
+});
+
+root.emit(MSG, "hi");                    // every listener, in registration order
+Optional<Integer> n = root.bail(ASK, "four");     // first non-null answer: 4
+List<Integer> all = root.collect(ASK, "four");    // every non-null answer
+```
+
+- **No call after unregistration:** each call runs as an effect in the registration's own fiber. Unregistering waits (through the core) for calls still running on other threads, and refuses new ones. A listener may unregister itself during its own call.
+- **No silent loss:** `emit` and `collect` run every listener, then throw all failures together as an `EmitException`. `bail` throws at the first failure.
+- **Typed:** an event or answer of the wrong type is rejected with `ClassCastException`.
 
 ### Core API
 
@@ -170,7 +195,7 @@ stateDiagram-v2
 ```text
 java/
 ├── core/        Lifecycle kernel (Fiber, Signal, Teardown, WaitGraph, ...)
-├── context/     Plugins and services on top of core (Context, Plugin, ServiceKey, ...)
+├── context/     Plugins, services and events on top of core (Context, Plugin, ServiceKey, EventKey, ...)
 ├── examples/    Example program using core
 └── buildSrc/    Shared Gradle conventions (Java 21, -Xlint:all -Werror)
 ```

@@ -5,8 +5,10 @@ import core.Disposable;
 import core.Effect;
 import core.Fiber;
 import core.Signal;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * What a plugin sees: its own fiber, the services it declared, and a way to install more plugins and
@@ -17,7 +19,8 @@ import java.util.Objects;
  *  - effect / use : plain core work;
  *  - plugin       : a child plugin, started now or as soon as its services exist;
  *  - provide      : publishes a service to the whole tree; undo = retract it, which first disposes
- *                   every plugin that depends on it.
+ *                   every plugin that depends on it;
+ *  - on / hook    : listens to an event or answers a hook; undo = unregister, after every running call.
  */
 public sealed class Context permits Root {
 
@@ -128,6 +131,57 @@ public sealed class Context permits Root {
     reg.startDependents(key);
     return handle;
   }
+
+  // ---------------- events ----------------
+
+  /**
+   * Listens to an event until this context is disposed (or the returned handle is). When the
+   * unregistration returns, the listener is not running anywhere and will never be called again.
+   */
+  public <E> Disposable on(EventKey<E> key, Listener<E> listener) {
+    Objects.requireNonNull(key, "key");
+    Objects.requireNonNull(listener, "listener");
+    return register(key, "on:" + key.name(), listener);
+  }
+
+  /** Registers a hook handler, with the same lifetime rules as on(). */
+  public <E, R> Disposable hook(HookKey<E, R> key, Hook<E, R> handler) {
+    Objects.requireNonNull(key, "key");
+    Objects.requireNonNull(handler, "handler");
+    return register(key, "hook:" + key.name(), handler);
+  }
+
+  /**
+   * Calls every listener of the event, in registration order, on this thread. One failing listener does
+   * not stop the others; afterwards all failures are thrown together as an EmitException.
+   */
+  public <E> void emit(EventKey<E> key, E event) {
+    Objects.requireNonNull(key, "key");
+    reg.bus.emit(key, event);
+  }
+
+  /** Asks hook handlers in registration order and returns the first non-null answer. A failure throws at once. */
+  public <E, R> Optional<R> bail(HookKey<E, R> key, E event) {
+    Objects.requireNonNull(key, "key");
+    return reg.bus.bail(key, event);
+  }
+
+  /** Asks every hook handler; returns their non-null answers in order. Failures are thrown together after. */
+  public <E, R> List<R> collect(HookKey<E, R> key, E event) {
+    Objects.requireNonNull(key, "key");
+    return reg.bus.collect(key, event);
+  }
+
+  private Disposable register(Object key, String slotName, Object fn) {
+    return fiber.use(slotName, f -> {
+      Bus.Registration r = new Bus.Registration(name + "/" + slotName, f, fn);
+      reg.bus.add(key, r);
+      // Runs after f is disposed, i.e. after every call still running in it has returned.
+      return () -> reg.bus.remove(key, r);
+    });
+  }
+
+  // ---------------- services ----------------
 
   /** Whether a service is currently provided. Informational only: it may change right after the call. */
   public boolean isProvided(ServiceKey<?> key) {
