@@ -19,7 +19,13 @@ Opening a database, starting a server, registering routes: each step needs an un
 - A `Component` receives its own child fiber, creates more work in it, and returns its own cleanup.
 - Disposing a fiber undoes everything in reverse start order, children before parents.
 
-The `core` module has no library dependencies and is built to stay that way.
+On top of the tree, the `context` module adds **plugins and services**:
+
+- A `Plugin` declares the services it `requires()` and runs only while all of them are provided.
+- `ctx.provide(key, impl)` publishes a service; retracting it first disposes every plugin that depends on it, then lets the provider clean up.
+- When the services come back, dependent plugins are applied again in a fresh context.
+
+`core` and `context` have no library dependencies and are built to stay that way.
 
 > [!NOTE]
 > This project builds on the ideas of [cordis](https://github.com/cordiverse/cordis) by Shigma, "A Meta-Framework of Spatiotemporal Composability". Credit for the original concept goes to the cordis authors. See [Acknowledgements](#acknowledgements).
@@ -80,6 +86,46 @@ flowchart TD
 
 Disposing `server` undoes its contents in reverse start order, children before the parent: `child` → `route` → `server`. Each branch has its own undo list, so `db` is untouched until `root` is disposed. See [`Main.java`](java/examples/src/main/java/Main.java) for a complete tree written with named classes instead of lambdas.
 
+### Plugins and services
+
+```java
+ServiceKey<Db> DB = ServiceKey.of("db", Db.class);
+Root root = Context.root("app");
+
+// Waits until DB exists; disposed as soon as DB is retracted, applied again when it returns.
+root.plugin("server", Plugin.require(DB).then(ctx -> {
+  Db db = ctx.get(DB);            // only declared services are reachable
+  System.out.println("server: start on " + db.url());
+  return () -> System.out.println("server: stop");
+}));
+
+PluginHandle db = root.plugin("db", ctx -> {
+  ctx.effect("conn", s -> () -> System.out.println("db: close"));
+  ctx.provide(DB, () -> "pg://local");   // server starts here, on this thread
+  return null;
+});
+
+db.dispose();    // server: stop -> db: close
+root.dispose();  // disposes whatever is left
+```
+
+| Type | Role |
+| --- | --- |
+| `Context` | What a plugin sees: `effect()`, `use()`, `plugin()`, `provide()`, `get()`, `signal()` |
+| `Root` | Top-level context: `Context.root()`, `dispose()`, `awaitDisposed()`, `describe()` |
+| `Plugin` | `Disposable apply(Context ctx)` plus `requires()`; `Plugin.require(keys...).then(body)` |
+| `ServiceKey<T>` | Typed service name; same name and type means same service |
+| `PluginHandle` | Uninstalls a plugin for good; `isActive()` |
+| `ErrorHandler` | Receives failures with no caller (a plugin started by another thread's `provide()`) |
+
+Service guarantees, in addition to the core ones:
+
+- **Dependents first:** retracting a service disposes its dependents (newest first, cascading through chains) before the provider's own cleanup runs, including during `root.dispose()`.
+- **No use after retract:** if a dependent's `apply()` is still running on another thread, the retraction waits for it through the core, so deadlock avoidance still applies.
+- **One provider per key:** a second `provide()` of a key throws `ServiceConflictException` until the first is retracted.
+- **Tracked lifetimes:** `ctx.get()` only returns services declared in `requires()`.
+- **Failures:** a plugin applied immediately throws to the `plugin()` caller; one started by a provider reports to the `ErrorHandler` and is retried when its services change.
+
 ### Core API
 
 | Type | Role |
@@ -124,6 +170,7 @@ stateDiagram-v2
 ```text
 java/
 ├── core/        Lifecycle kernel (Fiber, Signal, Teardown, WaitGraph, ...)
+├── context/     Plugins and services on top of core (Context, Plugin, ServiceKey, ...)
 ├── examples/    Example program using core
 └── buildSrc/    Shared Gradle conventions (Java 21, -Xlint:all -Werror)
 ```
@@ -138,6 +185,7 @@ All compiler warnings are errors. Tests are plain programs with `main()` (no JUn
 
 ```bash
 cd java
-./gradlew :core:coreTests   # run the core test suite
-./gradlew check             # same, as part of the standard lifecycle
+./gradlew :core:coreTests        # run the core test suite
+./gradlew :context:contextTests  # run the context test suite
+./gradlew check                  # all of the above
 ```
