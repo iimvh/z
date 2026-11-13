@@ -98,10 +98,50 @@ public sealed class Context permits Root {
    */
   public PluginHandle plugin(String name, Plugin plugin) {
     Objects.requireNonNull(plugin, "plugin");
-    String n = nameOf(name, plugin);
+    Object fn = plugin instanceof Plugin.Requiring r ? r.body() : plugin;
+    Host.Body body = new Host.Body() {
+      @Override
+      public Disposable apply(Context ctx, Object config) {
+        return plugin.apply(ctx);
+      }
+
+      @Override
+      public boolean reconfigure(Context ctx, Object previous, Object next) {
+        return false;
+      }
+    };
+    return install(nameOf(name, fn), plugin.requires(), body, null);
+  }
+
+  /**
+   * Installs a plugin with a config, under the same rules as plugin(name, plugin). The returned handle
+   * can change the config at runtime: only this plugin's branch is reconfigured or restarted.
+   */
+  public <C> ConfigHandle<C> plugin(String name, ConfigPlugin<C> plugin, C config) {
+    Objects.requireNonNull(plugin, "plugin");
+    Objects.requireNonNull(config, "config");
+    Object fn = plugin instanceof ConfigPlugin.Requiring<?> r ? r.body() : plugin;
+    Host.Body body = new Host.Body() {
+      @Override
+      @SuppressWarnings("unchecked")
+      public Disposable apply(Context ctx, Object c) {
+        return plugin.apply(ctx, (C) c);
+      }
+
+      @Override
+      @SuppressWarnings("unchecked")
+      public boolean reconfigure(Context ctx, Object previous, Object next) {
+        return plugin.reconfigure(ctx, (C) previous, (C) next);
+      }
+    };
+    PluginHandle h = install(nameOf(name, fn), plugin.requires(), body, config);
+    return new ConfigHandle<>(h, h.host());
+  }
+
+  private PluginHandle install(String n, List<ServiceKey<?>> requires, Host.Body body, Object config) {
     Host[] made = new Host[1];
     Disposable handle = fiber.use(n, hostFiber -> {
-      Host host = new Host(reg, plugin, n, hostFiber);
+      Host host = new Host(reg, n, requires, body, config, hostFiber);
       hostFiber.signal().onCancel(host::kill);
       hostFiber.effect("watch", signal -> {
         reg.watch(host);
@@ -193,9 +233,8 @@ public sealed class Context permits Root {
     return "Context[" + name + "]";
   }
 
-  private static String nameOf(String given, Plugin plugin) {
+  private static String nameOf(String given, Object fn) {
     if (given != null) return given;
-    Object fn = plugin instanceof Plugin.Requiring r ? r.body() : plugin;
     String n = fn.getClass().getSimpleName();
     return n.isEmpty() || n.contains("$$Lambda") ? "plugin" : n;
   }

@@ -18,6 +18,10 @@ public final class PluginHandle implements Disposable {
     return host != null && host.isActive();
   }
 
+  Host host() {
+    return host;
+  }
+
   @Override
   public void dispose() {
     handle.dispose();
